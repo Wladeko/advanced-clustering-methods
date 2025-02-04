@@ -132,7 +132,7 @@ class ClusteringAnalysis:
 
                 with gzip.GzipFile(fileobj=compressed_data) as f:
                     data_str = f.read().decode("utf-8")
-                    data = pd.read_csv(io.StringIO(data_str), header=None, sep="\s+")
+                    data = pd.read_csv(io.StringIO(data_str), header=None, sep=r"\s+")
 
                 progress.update(task, completed=100)
 
@@ -178,32 +178,40 @@ class ClusteringAnalysis:
         eps = distances[elbow_idx]
 
         # Step 4: Plot k-distance graph
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+        try:
+            # Create new figure
+            plt.clf()
+            plt.close("all")
 
-        # Full plot
-        ax1.plot(distances, "b-")
-        ax1.axhline(y=eps, color="r", linestyle="--", label=f"Estimated eps = {eps:.2f}")
-        ax1.set_title("K-distance Graph")
-        ax1.set_xlabel("Points")
-        ax1.set_ylabel("k-distance")
-        ax1.legend()
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
 
-        # Zoomed plot around the elbow
-        zoom_range = slice(max(0, elbow_idx - 100), min(len(distances), elbow_idx + 100))
-        ax2.plot(distances, "b-")
-        ax2.set_xlim(zoom_range.start, zoom_range.stop)
-        ax2.axhline(y=eps, color="r", linestyle="--", label=f"Estimated eps = {eps:.2f}")
-        ax2.set_title("K-distance Graph (Zoomed)")
-        ax2.set_xlabel("Points")
-        ax2.set_ylabel("k-distance")
-        ax2.legend()
+            # Full plot
+            ax1.plot(distances, "b-")
+            ax1.axhline(y=eps, color="r", linestyle="--", label=f"Estimated eps = {eps:.2f}")
+            ax1.set_title("K-distance Graph")
+            ax1.set_xlabel("Points")
+            ax1.set_ylabel("k-distance")
+            ax1.legend()
 
-        plt.tight_layout()
+            # Zoomed plot around the elbow
+            zoom_range = slice(max(0, elbow_idx - 100), min(len(distances), elbow_idx + 100))
+            ax2.plot(distances, "b-")
+            ax2.set_xlim(zoom_range.start, zoom_range.stop)
+            ax2.axhline(y=eps, color="r", linestyle="--", label=f"Estimated eps = {eps:.2f}")
+            ax2.set_title("K-distance Graph (Zoomed)")
+            ax2.set_xlabel("Points")
+            ax2.set_ylabel("k-distance")
+            ax2.legend()
 
-        # Save plot
-        plot_path = self.run_dir / "plots" / f"{dataset_name}_kdistance.png"
-        plt.savefig(plot_path, dpi=300, bbox_inches="tight")
-        plt.close()
+            plt.tight_layout()
+
+            # Save plot
+            plot_path = self.run_dir / "plots" / f"{dataset_name}_kdistance.png"
+            plt.savefig(plot_path, dpi=300, bbox_inches="tight")
+            plt.close("all")
+
+        except Exception as e:
+            self.console.print(f"[yellow]Warning: Could not create k-distance plot: {str(e)}[/yellow]")
 
         # Save estimation results
         estimation_results = {
@@ -211,6 +219,7 @@ class ClusteringAnalysis:
             "min_samples": min_samples,
             "eps": float(eps),
             "elbow_idx": int(elbow_idx),
+            "distances": distances.tolist(),  # Save distances for possible later plotting
         }
 
         results_path = self.run_dir / "metrics" / f"{dataset_name}_parameter_estimation.json"
@@ -400,7 +409,10 @@ class ClusteringAnalysis:
 
     def visualize_2d_clustering(self, data, labels, title, dataset_name):
         """Visualize clustering results for 2D data"""
-        with self.console.status("[cyan]Creating 2D visualization...", spinner="dots"):
+        try:
+            plt.clf()
+            plt.close("all")
+
             fig, ax = plt.subplots(figsize=(12, 8))
             scatter = ax.scatter(data[:, 0], data[:, 1], c=labels, cmap="viridis", alpha=0.6)
             plt.colorbar(scatter)
@@ -411,12 +423,20 @@ class ClusteringAnalysis:
             plt.tight_layout()
 
             # Save plot
-            self.save_plot(fig, f"{dataset_name}_2d_clustering")
-            plt.close(fig)
+            plot_path = self.run_dir / "plots" / f"{dataset_name}_2d_clustering.png"
+            plt.savefig(plot_path, dpi=300, bbox_inches="tight")
+            plt.close("all")
+
+        except Exception as e:
+            self.console.print(f"[yellow]Warning: Could not create 2D clustering plot: {str(e)}[/yellow]")
 
     def visualize_high_dim_clustering(self, data, labels, title, dataset_name):
         """Visualize clustering results for high-dimensional data using PCA"""
-        with self.console.status("[cyan]Performing dimensionality reduction and visualization...", spinner="dots"):
+        try:
+            plt.clf()
+            plt.close("all")
+
+            # Apply PCA
             pca = PCA(n_components=2, random_state=RANDOM_SEED)
             data_2d = pca.fit_transform(data)
 
@@ -430,17 +450,21 @@ class ClusteringAnalysis:
             ax.grid(True, linestyle="--", alpha=0.7)
             plt.tight_layout()
 
-            # Save plot and PCA results
-            self.save_plot(fig, f"{dataset_name}_pca_clustering")
-            plt.close(fig)
+            # Save plot
+            plot_path = self.run_dir / "plots" / f"{dataset_name}_pca_clustering.png"
+            plt.savefig(plot_path, dpi=300, bbox_inches="tight")
+            plt.close("all")
 
-            # Save PCA explained variance ratios
+            # Save PCA results
             pca_results = {
                 "explained_variance_ratio": list(pca.explained_variance_ratio_),
                 "cumulative_variance_ratio": list(np.cumsum(pca.explained_variance_ratio_)),
             }
             with open(self.run_dir / "metrics" / f"{dataset_name}_pca_results.json", "w") as f:
                 json.dump(pca_results, f, indent=4)
+
+        except Exception as e:
+            self.console.print(f"[yellow]Warning: Could not create PCA visualization: {str(e)}[/yellow]")
 
     def run_analysis(self):
         """Run the complete analysis pipeline"""
@@ -480,139 +504,6 @@ def main():
     warnings.filterwarnings("ignore")
 
     # Create and run analysis
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
-    analyzer = ClusteringAnalysis()
-    analyzer.run_analysis()
-
-
-if __name__ == "__main__":
-    main()
     analyzer = ClusteringAnalysis()
     analyzer.run_analysis()
 
