@@ -35,6 +35,8 @@ from sklearn.neighbors import KDTree, NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 from tqdm.auto import tqdm
 
+# from cuml.cluster import HDBSCAN
+
 # Set random seed for reproducibility
 RANDOM_SEED = 42
 np.random.seed(RANDOM_SEED)
@@ -268,9 +270,11 @@ class ClusteringAnalysis:
 
         # Step 2: Calculate k-nearest neighbors distances
         self.console.print(f"[cyan]Calculating {min_samples}-nearest neighbors distances...[/cyan]")
+        scaler = StandardScaler()
+        data_scaled = scaler.fit_transform(data)
         neighbors = NearestNeighbors(n_neighbors=min_samples)
-        neighbors_fit = neighbors.fit(data)
-        distances, _ = neighbors_fit.kneighbors(data)
+        neighbors_fit = neighbors.fit(data_scaled)
+        distances, _ = neighbors_fit.kneighbors(data_scaled)
 
         # Sort distances in ascending order
         k_distances = np.sort(distances[:, min_samples - 1])  # Exclude self-distance
@@ -363,7 +367,7 @@ class ClusteringAnalysis:
         scaler = StandardScaler()
         data_scaled = scaler.fit_transform(data)
 
-        dbscan = MemoryEfficientDBSCAN(
+        dbscan = DBSCAN(
             eps=eps,
             min_samples=min_samples,
         )
