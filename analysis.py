@@ -1,3 +1,4 @@
+import gc
 import gzip
 import io
 import json
@@ -5,29 +6,133 @@ import os
 import time
 import urllib.request
 import warnings
+from collections import deque
 from datetime import datetime
 from pathlib import Path
+from typing import List, Set, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
 from colorama import init
+from kneed import KneeLocator
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+)
 from rich.table import Table
 from rich.text import Text
 from sklearn.cluster import DBSCAN
 from sklearn.decomposition import PCA
 from sklearn.metrics import calinski_harabasz_score, silhouette_score
-from sklearn.neighbors import NearestNeighbors
+from sklearn.neighbors import KDTree, NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 from tqdm.auto import tqdm
 
 # Set random seed for reproducibility
 RANDOM_SEED = 42
 np.random.seed(RANDOM_SEED)
+
+
+class MemoryEfficientDBSCAN:
+    def __init__(self, eps: float, min_samples: int, leaf_size: int = 40):
+        """
+        Initialize the DBSCAN clusterer with memory optimizations.
+
+        Args:
+            eps: The maximum distance between two samples for them to be considered neighbors
+            min_samples: The minimum number of samples in a neighborhood to form a core point
+            leaf_size: The leaf size for the KD-tree (affects memory usage vs speed tradeoff)
+        """
+        self.eps = eps
+        self.min_samples = min_samples
+        self.leaf_size = leaf_size
+        self.labels_ = None
+
+    def _chunk_data(self, X: np.ndarray, chunk_size: int = 10000) -> List[np.ndarray]:
+        """Split data into manageable chunks to reduce memory usage."""
+        return np.array_split(X, max(1, len(X) // chunk_size))
+
+    def _find_neighbors(self, X: np.ndarray, chunk: np.ndarray) -> List[Set[int]]:
+        """Find neighbors for points in the chunk using KD-tree with bounded memory."""
+        tree = KDTree(X, leaf_size=self.leaf_size)
+        neighbors = tree.query_radius(chunk, r=self.eps)
+        del tree
+        gc.collect()
+        return [set(n) for n in neighbors]
+
+    def _expand_cluster(
+        self, X: np.ndarray, point_idx: int, neighbors: Set[int], cluster_id: int, visited: Set[int]
+    ) -> None:
+        """Expand cluster using a memory-efficient queue-based approach."""
+        queue = deque([point_idx])
+        visited.add(point_idx)
+        self.labels_[point_idx] = cluster_id
+
+        while queue:
+            current_point = queue.popleft()
+            current_neighbors = self._find_neighbors(X, X[current_point : current_point + 1])[0]
+
+            if len(current_neighbors) >= self.min_samples:
+                for neighbor in current_neighbors:
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        self.labels_[neighbor] = cluster_id
+                        queue.append(neighbor)
+
+    def fit(self, X: np.ndarray) -> "MemoryEfficientDBSCAN":
+        """
+        Fit the DBSCAN clustering model using a memory-efficient approach.
+
+        Args:
+            X: Input data of shape (n_samples, n_features)
+
+        Returns:
+            self: The fitted clusterer
+        """
+        n_samples = X.shape[0]
+        self.labels_ = np.full(n_samples, -1)
+        visited = set()
+        current_cluster = 0
+
+        # Process data in chunks
+        chunks = self._chunk_data(X)
+
+        for chunk_idx, chunk in enumerate(chunks):
+            chunk_neighbors = self._find_neighbors(X, chunk)
+
+            for i, neighbors in enumerate(chunk_neighbors):
+                point_idx = i + chunk_idx * len(chunk)
+
+                if point_idx in visited:
+                    continue
+
+                if len(neighbors) >= self.min_samples:
+                    self._expand_cluster(X, point_idx, neighbors, current_cluster, visited)
+                    current_cluster += 1
+                else:
+                    visited.add(point_idx)
+
+        return self
+
+    def fit_predict(self, X: np.ndarray) -> np.ndarray:
+        """
+        Fit the model and return cluster labels.
+
+        Args:
+            X: Input data
+
+        Returns:
+            Array of cluster labels
+        """
+        self.fit(X)
+        return self.labels_
 
 
 class ClusteringAnalysis:
@@ -168,18 +273,31 @@ class ClusteringAnalysis:
         distances, _ = neighbors_fit.kneighbors(data)
 
         # Sort distances in ascending order
-        distances = np.sort(distances[:, 1])  # Exclude self-distance
+        k_distances = np.sort(distances[:, min_samples - 1])  # Exclude self-distance
+
+        x_points = np.arange(len(k_distances))
 
         # Step 3: Find elbow point using maximum curvature
-        first_derivative = np.gradient(distances)
-        second_derivative = np.gradient(first_derivative)
-        curvature = np.abs(second_derivative) / (1 + first_derivative**2) ** 1.5
-        elbow_idx = np.argmax(curvature)
-        eps = distances[elbow_idx]
+        kneedle = KneeLocator(
+            x_points, k_distances, S=1.0, curve="convex", direction="increasing"  # Sensitivity parameter
+        )
+
+        eps = k_distances[kneedle.knee]
+        elbow_idx = kneedle.knee
 
         # Step 4: Plot k-distance graph
         try:
             # Create new figure
+            plt.clf()
+            plt.close("all")
+            kneedle.plot_knee_normalized()
+            plot_path = self.run_dir / "plots" / f"{dataset_name}_knee_norm.png"
+            plt.savefig(plot_path, dpi=300, bbox_inches="tight")
+            plt.clf()
+            plt.close("all")
+            kneedle.plot_knee()
+            plot_path = self.run_dir / "plots" / f"{dataset_name}_knee.png"
+            plt.savefig(plot_path, dpi=300, bbox_inches="tight")
             plt.clf()
             plt.close("all")
 
@@ -245,7 +363,7 @@ class ClusteringAnalysis:
         scaler = StandardScaler()
         data_scaled = scaler.fit_transform(data)
 
-        dbscan = DBSCAN(
+        dbscan = MemoryEfficientDBSCAN(
             eps=eps,
             min_samples=min_samples,
         )
@@ -272,11 +390,12 @@ class ClusteringAnalysis:
         min_samples, eps, estimation_results = self.estimate_dbscan_parameters(data, dataset_name)
 
         # Define search ranges around estimated values
-        eps_range = np.linspace(eps * 0.5, eps * 1.5, 20)  # [0.9 * eps, eps, 1.1, eps]  # Search around estimated eps
-        min_samples_range = range(
-            max(2, int(min_samples * 0.5)), int(min_samples * 1.5)
-        )  # [min_samples - 1,min_samples,min_samples + 1,]
-
+        eps_range = [0.9 * eps, eps, 1.1 * eps]  # [0.9 * eps, eps, 1.1* eps]  # Search around estimated eps
+        min_samples_range = [
+            min_samples - 1,
+            min_samples,
+            min_samples + 1,
+        ]  # [min_samples - 1,min_samples,min_samples + 1,]
         # Store parameter ranges in config
         self.config[f"{dataset_name}_parameter_ranges"] = {
             "eps_range": list(eps_range),
