@@ -385,7 +385,7 @@ class ClusteringAnalysis:
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
 
             # Full plot
-            ax1.plot(distances, "b-")
+            ax1.plot(k_distances, "b-")
             ax1.axhline(y=eps, color="r", linestyle="--", label=f"Estimated eps = {eps:.2f}")
             ax1.set_title("K-distance Graph")
             ax1.set_xlabel("Points")
@@ -394,7 +394,7 @@ class ClusteringAnalysis:
 
             # Zoomed plot around the elbow
             zoom_range = slice(max(0, elbow_idx - 100), min(len(distances), elbow_idx + 100))
-            ax2.plot(distances, "b-")
+            ax2.plot(k_distances, "b-")
             ax2.set_xlim(zoom_range.start, zoom_range.stop)
             ax2.axhline(y=eps, color="r", linestyle="--", label=f"Estimated eps = {eps:.2f}")
             ax2.set_title("K-distance Graph (Zoomed)")
@@ -541,6 +541,7 @@ class ClusteringAnalysis:
         with open(results_path, "w") as f:
             json.dump(optimization_results, f, indent=4)
 
+        self.best_params = best_params
         return best_params
 
     def evaluate_and_store_results(
@@ -574,8 +575,8 @@ class ClusteringAnalysis:
         # Store results
         self.results[filename] = {
             "dbscan": {
-                "optimal_eps": float(self.best_params[filename][0]),
-                "optimal_min_samples": int(self.best_params[filename][1]),
+                "optimal_eps": float(self.best_params[0]),
+                "optimal_min_samples": int(self.best_params[1]),
                 **dbscan_results.to_dict(),
             },
             "hdbscan": hdbscan_results.to_dict(),
