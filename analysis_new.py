@@ -3,7 +3,13 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import DBSCAN
-from sklearn.metrics import silhouette_score, adjusted_rand_score, adjusted_mutual_info_score
+from sklearn.metrics import (
+    silhouette_score,
+    adjusted_rand_score,
+    adjusted_mutual_info_score,
+    calinski_harabasz_score,
+    davies_bouldin_score,
+)
 from sklearn.neighbors import NearestNeighbors
 from kneed import KneeLocator
 import seaborn as sns
@@ -13,10 +19,10 @@ from pathlib import Path
 import requests
 from typing import Tuple, List, Dict
 import pickle
-import urllib
+from tqdm import tqdm
+import urllib.request
 import io
 import gzip
-import urllib.request
 
 
 class DBSCANAnalyzer:
@@ -130,6 +136,9 @@ class DBSCANAnalyzer:
         """
         eps_range = np.linspace(initial_eps * 0.5, initial_eps * 1.5, 10)
         min_samples_range = range(max(2, int(initial_min_samples * 0.5)), int(initial_min_samples * 1.5))
+        # eps_range = [initial_eps]
+        # min_samples_range = [initial_min_samples]
+        #! CHANGE
 
         return [{"eps": eps, "min_samples": ms} for eps in eps_range for ms in min_samples_range]
 
@@ -159,20 +168,70 @@ class DBSCANAnalyzer:
         labels = dbscan.labels_
 
         # Calculate metrics
-        sil_score = silhouette_score(self.X_scaled, labels) if len(np.unique(labels)) > 1 else -1
+        n_clusters = len(np.unique(labels[labels != -1]))
+        if n_clusters > 1:
+            sil_score = silhouette_score(self.X_scaled, labels)
+            calinski_score = calinski_harabasz_score(self.X_scaled, labels)
+            davies_score = davies_bouldin_score(self.X_scaled, labels)
+        else:
+            sil_score = -1
+            calinski_score = -1
+            davies_score = float("inf")
+
         ari_score = adjusted_rand_score(self.ref_labels, labels)
         ami_score = adjusted_mutual_info_score(self.ref_labels, labels)
 
         # Cache results
-        results = (labels, sil_score, ari_score, ami_score)
+        results = (labels, sil_score, ari_score, ami_score, calinski_score, davies_score)
+        print(results)
         with open(cache_file, "wb") as f:
             pickle.dump(results, f)
 
         return results
 
+    def normalize_scores(self, scores_list: List[Dict]) -> List[Dict]:
+        """
+        Normalize all metric scores to [0, 1] range.
+        For metrics where lower is better (Davies-Bouldin), also invert the score.
+        """
+        metrics = ["silhouette", "ari", "ami", "calinski", "davies"]
+        normalized_scores = []
+
+        # Get min and max for each metric
+        metric_ranges = {
+            metric: {"min": min(s[metric] for s in scores_list), "max": max(s[metric] for s in scores_list)}
+            for metric in metrics
+        }
+
+        for score_dict in scores_list:
+            normalized = {"eps": score_dict["eps"], "min_samples": score_dict["min_samples"]}
+
+            for metric in metrics:
+                min_val = metric_ranges[metric]["min"]
+                max_val = metric_ranges[metric]["max"]
+
+                if max_val - min_val == 0:
+                    normalized[f"{metric}_norm"] = 0
+                else:
+                    score = (score_dict[metric] - min_val) / (max_val - min_val)
+                    # Invert scores where lower is better
+                    if metric in ["davies"]:
+                        score = 1 - score
+                    normalized[f"{metric}_norm"] = score
+
+            normalized_scores.append(normalized)
+
+        return normalized_scores
+
+    def calculate_combined_score(self, normalized_scores: Dict, weights: Dict) -> float:
+        """
+        Calculate weighted sum of normalized scores.
+        """
+        return sum(normalized_scores[f"{metric}_norm"] * weight for metric, weight in weights.items())
+
     def find_best_parameters(self, param_grid: List[Dict]) -> Tuple[Dict, np.ndarray]:
         """
-        Find the best parameters from the grid based on silhouette score.
+        Find the best parameters from the grid based on multiple metrics.
 
         Args:
             param_grid: List of parameter dictionaries
@@ -180,13 +239,18 @@ class DBSCANAnalyzer:
         Returns:
             Tuple of (best_params, best_labels)
         """
-        best_score = -1
-        best_params = None
-        best_labels = None
+        # Define weights for different metrics
+        metric_weights = {
+            "silhouette": 0.3,  # Internal metric
+            "calinski": 0.2,  # Internal metric
+            "davies": 0.2,  # Internal metric
+            "ari": 0.15,  # External metric (comparing with reference)
+            "ami": 0.15,  # External metric (comparing with reference)
+        }
 
         results = []
-        for params in param_grid:
-            labels, sil_score, ari_score, ami_score = self.run_dbscan(params)
+        for params in tqdm(param_grid, total=len(param_grid), desc="Parameter search"):
+            labels, sil_score, ari_score, ami_score, calinski_score, davies_score = self.run_dbscan(params)
             results.append(
                 {
                     "eps": params["eps"],
@@ -194,13 +258,27 @@ class DBSCANAnalyzer:
                     "silhouette": sil_score,
                     "ari": ari_score,
                     "ami": ami_score,
+                    "calinski": calinski_score,
+                    "davies": davies_score,
+                    "labels": labels,
                 }
             )
 
-            if sil_score > best_score:
-                best_score = sil_score
-                best_params = params
-                best_labels = labels
+        # Normalize scores
+        normalized_results = self.normalize_scores(results)
+
+        # Find best parameters based on combined score
+        best_combined_score = -1
+        best_params = None
+        best_labels = None
+
+        for norm_result, orig_result in zip(normalized_results, results):
+            combined_score = self.calculate_combined_score(norm_result, metric_weights)
+
+            if combined_score > best_combined_score:
+                best_combined_score = combined_score
+                best_params = {"eps": norm_result["eps"], "min_samples": norm_result["min_samples"]}
+                best_labels = orig_result["labels"]
 
         # Save parameter search results
         pd.DataFrame(results).to_csv(self.cache_dir / f"{self.dataset_name}_parameter_search.csv", index=False)
