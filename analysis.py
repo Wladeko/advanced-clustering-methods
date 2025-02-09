@@ -471,12 +471,8 @@ class ClusteringAnalysis:
         min_samples, eps, estimation_results = self.estimate_dbscan_parameters(data, dataset_name)
 
         # Define search ranges around estimated values
-        eps_range = [0.9 * eps, eps, 1.1 * eps]  # [0.9 * eps, eps, 1.1* eps]  # Search around estimated eps
-        min_samples_range = [
-            min_samples - 1,
-            min_samples,
-            min_samples + 1,
-        ]  # [min_samples - 1,min_samples,min_samples + 1,]
+        eps_range = [eps]  # [0.9 * eps, eps, 1.1* eps]  # Search around estimated eps
+        min_samples_range = [min_samples]  # [min_samples - 1,min_samples,min_samples + 1,]
         # Store parameter ranges in config
         self.config[f"{dataset_name}_parameter_ranges"] = {
             "eps_range": list(eps_range),
