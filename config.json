@@ -1,0 +1,35 @@
+{
+    "data": {
+        "base_dir": "data",
+        "datasets": [
+            {
+                "name": "worms_2",
+                "is_2d": true
+            },
+            {
+                "name": "worms_64",
+                "is_2d": false
+            }
+        ]
+    },
+    "clustering": {
+        "dbscan": {
+            "leaf_size": 40,
+            "algorithm": "auto",
+            "n_jobs": -1
+        },
+        "hdbscan": {
+            "min_cluster_size": 5,
+            "min_samples": 5,
+            "metric": "euclidean",
+            "cluster_selection_method": "eom",
+            "alpha": 1.0
+        }
+    },
+    "visualization": {
+        "figure_size": [12, 8],
+        "dpi": 300,
+        "cmap": "viridis",
+        "point_size": 50
+    }
+}

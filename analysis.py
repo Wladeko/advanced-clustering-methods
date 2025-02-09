@@ -28,12 +28,14 @@ from rich.progress import (
 )
 from rich.table import Table
 from rich.text import Text
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import DBSCAN, HDBSCAN
 from sklearn.decomposition import PCA
-from sklearn.metrics import calinski_harabasz_score, silhouette_score
+from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 from sklearn.neighbors import KDTree, NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 from tqdm.auto import tqdm
+from sklearn.manifold import TSNE
+from dataclasses import dataclass
 
 # from cuml.cluster import HDBSCAN
 
@@ -42,104 +44,101 @@ RANDOM_SEED = 42
 np.random.seed(RANDOM_SEED)
 
 
-class MemoryEfficientDBSCAN:
-    def __init__(self, eps: float, min_samples: int, leaf_size: int = 40):
-        """
-        Initialize the DBSCAN clusterer with memory optimizations.
+class DataManager:
+    def __init__(self, base_dir: Path):
+        self.base_dir = Path(base_dir)
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.console = Console()
 
-        Args:
-            eps: The maximum distance between two samples for them to be considered neighbors
-            min_samples: The minimum number of samples in a neighborhood to form a core point
-            leaf_size: The leaf size for the KD-tree (affects memory usage vs speed tradeoff)
-        """
-        self.eps = eps
-        self.min_samples = min_samples
-        self.leaf_size = leaf_size
-        self.labels_ = None
+    def get_data(self, filename: str) -> pd.DataFrame:
+        """Load data from local storage or download if not available"""
+        data_path = self.base_dir / f"{filename}.pkl"
 
-    def _chunk_data(self, X: np.ndarray, chunk_size: int = 10000) -> List[np.ndarray]:
-        """Split data into manageable chunks to reduce memory usage."""
-        return np.array_split(X, max(1, len(X) // chunk_size))
+        if data_path.exists():
+            self.console.print(f"[green]Loading {filename} from local storage[/green]")
+            return pd.read_pickle(data_path)
 
-    def _find_neighbors(self, X: np.ndarray, chunk: np.ndarray) -> List[Set[int]]:
-        """Find neighbors for points in the chunk using KD-tree with bounded memory."""
-        tree = KDTree(X, leaf_size=self.leaf_size)
-        neighbors = tree.query_radius(chunk, r=self.eps)
-        del tree
-        gc.collect()
-        return [set(n) for n in neighbors]
+        self.console.print(f"[yellow]Downloading {filename} from repository[/yellow]")
+        data = self._download_data(filename)
+        data.to_pickle(data_path)
+        return data
 
-    def _expand_cluster(
-        self, X: np.ndarray, point_idx: int, neighbors: Set[int], cluster_id: int, visited: Set[int]
-    ) -> None:
-        """Expand cluster using a memory-efficient queue-based approach."""
-        queue = deque([point_idx])
-        visited.add(point_idx)
-        self.labels_[point_idx] = cluster_id
+    def _download_data(self, filename: str) -> pd.DataFrame:
+        """Download data from repository"""
+        url = f"https://raw.githubusercontent.com/gagolews/clustering-data-v1/master/sipu/{filename}.data.gz"
 
-        while queue:
-            current_point = queue.popleft()
-            current_neighbors = self._find_neighbors(X, X[current_point : current_point + 1])[0]
+        try:
+            response = urllib.request.urlopen(url)
+            compressed_data = io.BytesIO(response.read())
 
-            if len(current_neighbors) >= self.min_samples:
-                for neighbor in current_neighbors:
-                    if neighbor not in visited:
-                        visited.add(neighbor)
-                        self.labels_[neighbor] = cluster_id
-                        queue.append(neighbor)
+            with gzip.GzipFile(fileobj=compressed_data) as f:
+                data_str = f.read().decode("utf-8")
+                data = pd.read_csv(io.StringIO(data_str), header=None, sep=r"\s+")
 
-    def fit(self, X: np.ndarray) -> "MemoryEfficientDBSCAN":
-        """
-        Fit the DBSCAN clustering model using a memory-efficient approach.
+            return data
 
-        Args:
-            X: Input data of shape (n_samples, n_features)
+        except Exception as e:
+            self.console.print(f"[red]Error downloading data: {e}[/red]")
+            raise
 
-        Returns:
-            self: The fitted clusterer
-        """
-        n_samples = X.shape[0]
-        self.labels_ = np.full(n_samples, -1)
-        visited = set()
-        current_cluster = 0
 
-        # Process data in chunks
-        chunks = self._chunk_data(X)
+@dataclass
+class EvaluationResults:
+    silhouette: float
+    calinski_harabasz: float
+    davies_bouldin: float
+    n_clusters: int
+    n_noise: int
 
-        for chunk_idx, chunk in enumerate(chunks):
-            chunk_neighbors = self._find_neighbors(X, chunk)
+    def to_dict(self):
+        return {
+            "silhouette_score": self.silhouette,
+            "calinski_harabasz_score": self.calinski_harabasz,
+            "davies_bouldin_score": self.davies_bouldin,
+            "n_clusters": self.n_clusters,
+            "n_noise_points": self.n_noise,
+        }
 
-            for i, neighbors in enumerate(chunk_neighbors):
-                point_idx = i + chunk_idx * len(chunk)
 
-                if point_idx in visited:
-                    continue
+class ClusteringMethods:
+    def __init__(self, config: dict):
+        self.config = config
 
-                if len(neighbors) >= self.min_samples:
-                    self._expand_cluster(X, point_idx, neighbors, current_cluster, visited)
-                    current_cluster += 1
-                else:
-                    visited.add(point_idx)
+    def dbscan_clustering(self, data: np.ndarray, eps: float, min_samples: int) -> np.ndarray:
+        """Perform DBSCAN clustering"""
+        dbscan_params = self.config["clustering"]["dbscan"]
+        clusterer = DBSCAN(
+            eps=eps,
+            min_samples=min_samples,
+            leaf_size=dbscan_params["leaf_size"],
+            algorithm=dbscan_params["algorithm"],
+            n_jobs=dbscan_params["n_jobs"],
+        )
+        return clusterer.fit_predict(data)
 
-        return self
-
-    def fit_predict(self, X: np.ndarray) -> np.ndarray:
-        """
-        Fit the model and return cluster labels.
-
-        Args:
-            X: Input data
-
-        Returns:
-            Array of cluster labels
-        """
-        self.fit(X)
-        return self.labels_
+    def hdbscan_clustering(self, data: np.ndarray) -> np.ndarray:
+        """Perform HDBSCAN clustering"""
+        hdbscan_params = self.config["clustering"]["hdbscan"]
+        clusterer = HDBSCAN(
+            min_cluster_size=hdbscan_params["min_cluster_size"],
+            min_samples=hdbscan_params["min_samples"],
+            metric=hdbscan_params["metric"],
+            cluster_selection_method=hdbscan_params["cluster_selection_method"],
+            alpha=hdbscan_params["alpha"],
+        )
+        return clusterer.fit_predict(data)
 
 
 class ClusteringAnalysis:
-    def __init__(self, output_dir="clustering_results"):
-        """Initialize the clustering analysis with output directory setup"""
+    def __init__(self, config_path: str = "config.json", output_dir: str = "clustering_results"):
+        """Initialize the clustering analysis with configuration"""
+        # Load configuration
+        with open(config_path, "r") as f:
+            self.config = json.load(f)
+
+        # Initialize components
+        self.data_manager = DataManager(Path(self.config["data"]["base_dir"]))
+        self.clustering_methods = ClusteringMethods(self.config)
         # Initialize colorama for Windows PowerShell
         init()
 
@@ -219,6 +218,86 @@ class ClusteringAnalysis:
         plt.close(fig)
         self.console.print(f"[green]Saved plot: {plot_path}[/green]")
 
+    def visualize_clustering_comparison(self, data, labels_dbscan, labels_hdbscan, dataset_name):
+        plt.clf()
+        plt.close("all")
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=tuple(self.config["visualization"]["figure_size"]))
+
+        scatter1 = ax1.scatter(
+            data[:, 0],
+            data[:, 1],
+            c=labels_dbscan,
+            cmap=self.config["visualization"]["cmap"],
+            s=self.config["visualization"]["point_size"],
+        )
+        ax1.set_title("DBSCAN Clustering")
+        plt.colorbar(scatter1, ax=ax1)
+
+        # HDBSCAN plot
+        scatter2 = ax2.scatter(
+            data[:, 0],
+            data[:, 1],
+            c=labels_hdbscan,
+            cmap=self.config["visualization"]["cmap"],
+            s=self.config["visualization"]["point_size"],
+        )
+        ax2.set_title("HDBSCAN Clustering")
+        plt.colorbar(scatter2, ax=ax2)
+
+        plt.tight_layout()
+        self.save_plot(fig, f"{dataset_name}_clustering_comparison")
+
+    def visualize_dimension_reduction(self, data: np.ndarray, labels: np.ndarray, dataset_name: str, method: str):
+        """Create dimensionality reduction visualization using both PCA and t-SNE"""
+        if data.shape[1] <= 2:
+            return
+
+        plt.clf()
+        plt.close("all")
+
+        try:
+            # Perform dimensionality reduction
+            with self.progress_ctx() as progress:
+                task1 = progress.add_task("[cyan]Computing PCA...", total=1)
+                pca = PCA(n_components=2, random_state=RANDOM_SEED)
+                data_pca = pca.fit_transform(data)
+                progress.update(task1, advance=1)
+
+                task2 = progress.add_task("[cyan]Computing t-SNE...", total=1)
+                tsne = TSNE(n_components=2, random_state=RANDOM_SEED)
+                data_tsne = tsne.fit_transform(data)
+                progress.update(task2, advance=1)
+
+            # Create visualization
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=tuple(self.config["visualization"]["figure_size"]))
+
+            scatter1 = ax1.scatter(
+                data_pca[:, 0],
+                data_pca[:, 1],
+                c=labels,
+                cmap=self.config["visualization"]["cmap"],
+                s=self.config["visualization"]["point_size"],
+            )
+            ax1.set_title(f"{method} - PCA Projection")
+            plt.colorbar(scatter1, ax=ax1)
+
+            scatter2 = ax2.scatter(
+                data_tsne[:, 0],
+                data_tsne[:, 1],
+                c=labels,
+                cmap=self.config["visualization"]["cmap"],
+                s=self.config["visualization"]["point_size"],
+            )
+            ax2.set_title(f"{method} - t-SNE Projection")
+            plt.colorbar(scatter2, ax=ax2)
+
+            plt.tight_layout()
+            self.save_plot(fig, f"{dataset_name}_{method.lower()}_dim_reduction")
+
+        except Exception as e:
+            self.console.print(f"[red]Error in dimension reduction visualization: {str(e)}[/red]")
+
     def load_data(self, filename):
         """Load gzipped data from GitHub repository with progress bar"""
         url = f"https://raw.githubusercontent.com/gagolews/clustering-data-v1/master/sipu/{filename}.data.gz"
@@ -270,11 +349,9 @@ class ClusteringAnalysis:
 
         # Step 2: Calculate k-nearest neighbors distances
         self.console.print(f"[cyan]Calculating {min_samples}-nearest neighbors distances...[/cyan]")
-        scaler = StandardScaler()
-        data_scaled = scaler.fit_transform(data)
         neighbors = NearestNeighbors(n_neighbors=min_samples)
-        neighbors_fit = neighbors.fit(data_scaled)
-        distances, _ = neighbors_fit.kneighbors(data_scaled)
+        neighbors_fit = neighbors.fit(data)
+        distances, _ = neighbors_fit.kneighbors(data)
 
         # Sort distances in ascending order
         k_distances = np.sort(distances[:, min_samples - 1])  # Exclude self-distance
@@ -470,19 +547,88 @@ class ClusteringAnalysis:
 
         return best_params
 
+    def evaluate_and_store_results(
+        self, data: np.ndarray, dbscan_labels: np.ndarray, hdbscan_labels: np.ndarray, filename: str
+    ) -> None:
+        """Evaluate clustering results and store metrics"""
+
+        def evaluate_clustering(labels: np.ndarray) -> EvaluationResults:
+            # Skip evaluation if all points are noise
+            if len(np.unique(labels[labels >= 0])) <= 1:
+                return EvaluationResults(
+                    silhouette=0.0,
+                    calinski_harabasz=0.0,
+                    davies_bouldin=0.0,
+                    n_clusters=0,
+                    n_noise=np.sum(labels == -1),
+                )
+
+            return EvaluationResults(
+                silhouette=silhouette_score(data, labels, metric="euclidean"),
+                calinski_harabasz=calinski_harabasz_score(data, labels),
+                davies_bouldin=davies_bouldin_score(data, labels),
+                n_clusters=len(np.unique(labels[labels >= 0])),
+                n_noise=np.sum(labels == -1),
+            )
+
+        # Evaluate both methods
+        dbscan_results = evaluate_clustering(dbscan_labels)
+        hdbscan_results = evaluate_clustering(hdbscan_labels)
+
+        # Store results
+        self.results[filename] = {
+            "dbscan": {
+                "optimal_eps": float(self.best_params[filename][0]),
+                "optimal_min_samples": int(self.best_params[filename][1]),
+                **dbscan_results.to_dict(),
+            },
+            "hdbscan": hdbscan_results.to_dict(),
+        }
+
+        # Create comparison table
+        table = Table(title=f"Clustering Results - {filename}", show_header=True, header_style="bold magenta")
+        table.add_column("Metric", style="cyan")
+        table.add_column("DBSCAN", style="green")
+        table.add_column("HDBSCAN", style="blue")
+
+        metrics = [
+            ("Silhouette Score", "silhouette_score"),
+            ("Calinski-Harabasz Score", "calinski_harabasz_score"),
+            ("Davies-Bouldin Score", "davies_bouldin_score"),
+            ("Number of Clusters", "n_clusters"),
+            ("Noise Points", "n_noise_points"),
+        ]
+
+        for metric_name, metric_key in metrics:
+            dbscan_value = self.results[filename]["dbscan"][metric_key]
+            hdbscan_value = self.results[filename]["hdbscan"][metric_key]
+            table.add_row(
+                metric_name,
+                f"{dbscan_value:.4f}" if isinstance(dbscan_value, float) else str(dbscan_value),
+                f"{hdbscan_value:.4f}" if isinstance(hdbscan_value, float) else str(hdbscan_value),
+            )
+
+        # Add DBSCAN specific parameters
+        table.add_row("Optimal Epsilon", f"{self.results[filename]['dbscan']['optimal_eps']:.4f}", "N/A")
+        table.add_row("Optimal Min Samples", str(self.results[filename]["dbscan"]["optimal_min_samples"]), "N/A")
+
+        self.console.print(table)
+
     def analyze_dataset(self, filename, is_2d=True):
         """Main analysis function for a dataset"""
         self.console.rule(f"[bold blue]Analyzing {filename}")
 
         # Load data
-        data = self.load_data(filename)
+        data = self.data_manager.get_data(filename)
         if data is None:
             return
+        scaler = StandardScaler()
+        data_scaled = scaler.fit_transform(data)
 
         self.console.print(f"\n[bold cyan]Dataset Shape:[/bold cyan] {data.shape}")
 
         # Parameter optimization
-        best_params = self.optimize_parameters(data, filename)
+        best_params = self.optimize_parameters(data_scaled, filename)
 
         if best_params is None:
             self.console.print("[red]Could not find suitable parameters[/red]")
@@ -494,64 +640,67 @@ class ClusteringAnalysis:
 
         # Perform final clustering with optimal parameters
         self.console.print("\n[cyan]Performing final clustering with optimal parameters...[/cyan]")
-        clusters, data_scaled = self.perform_clustering(data, best_params[0], best_params[1])
+        dbscan_labels = self.clustering_methods.dbscan_clustering(data_scaled, best_params[0], best_params[1])
+        hdbscan_labels = self.clustering_methods.hdbscan_clustering(data_scaled)
 
         # Evaluate clustering
         self.console.print("[cyan]Evaluating final clustering...[/cyan]")
-        silhouette, calinski = self.evaluate_clustering(data_scaled, clusters)
+        self.evaluate_and_store_results(data_scaled, dbscan_labels, hdbscan_labels, filename)
 
-        # Store results
-        self.results[filename] = {
-            "optimal_eps": float(best_params[0]),
-            "optimal_min_samples": int(best_params[1]),
-            "silhouette_score": float(silhouette),
-            "calinski_harabasz_score": float(calinski),
-            "n_clusters": int(len(np.unique(clusters[clusters >= 0]))),
-            "n_noise_points": int(np.sum(clusters == -1)),
-        }
+        # # Store results
+        # self.results[filename] = {
+        #     "optimal_eps": float(best_params[0]),
+        #     "optimal_min_samples": int(best_params[1]),
+        #     "silhouette_score": float(silhouette),
+        #     "calinski_harabasz_score": float(calinski),
+        #     "n_clusters": int(len(np.unique(clusters[clusters >= 0]))),
+        #     "n_noise_points": int(np.sum(clusters == -1)),
+        # }
 
-        # Save results
-        self.save_results(filename)
+        # # Save results
+        # self.save_results(filename)
 
-        # Create results table
-        table = Table(title="Clustering Results", show_header=True, header_style="bold magenta")
-        table.add_column("Metric", style="cyan")
-        table.add_column("Value", style="green")
-        for key, value in self.results[filename].items():
-            table.add_row(key, f"{value}")
-        self.console.print(table)
+        # # Create results table
+        # table = Table(title="Clustering Results", show_header=True, header_style="bold magenta")
+        # table.add_column("Metric", style="cyan")
+        # table.add_column("Value", style="green")
+        # for key, value in self.results[filename].items():
+        #     table.add_row(key, f"{value}")
+        # self.console.print(table)
 
-        # Visualize results
-        self.console.print("\n[cyan]Generating visualizations...[/cyan]")
+        # # Visualize results
+        # self.console.print("\n[cyan]Generating visualizations...[/cyan]")
+        # if is_2d:
+        #     self.visualize_2d_clustering(data_scaled, clusters, f"DBSCAN Clustering Results - {filename}", filename)
+        # else:
+        #     self.visualize_high_dim_clustering(
+        #         data_scaled, clusters, f"DBSCAN Clustering Results - {filename}", filename
+        #     )
+
         if is_2d:
-            self.visualize_2d_clustering(data_scaled, clusters, f"DBSCAN Clustering Results - {filename}", filename)
+            self.visualize_clustering_comparison(data_scaled, dbscan_labels, hdbscan_labels, filename)
         else:
-            self.visualize_high_dim_clustering(
-                data_scaled, clusters, f"DBSCAN Clustering Results - {filename}", filename
-            )
+            self.visualize_dimension_reduction(data_scaled, dbscan_labels, filename, "DBSCAN")
+            self.visualize_dimension_reduction(data_scaled, hdbscan_labels, filename, "HDBSCAN")
 
     def visualize_2d_clustering(self, data, labels, title, dataset_name):
         """Visualize clustering results for 2D data"""
-        try:
-            plt.clf()
-            plt.close("all")
+        plt.clf()
+        plt.close("all")
 
-            fig, ax = plt.subplots(figsize=(12, 8))
-            scatter = ax.scatter(data[:, 0], data[:, 1], c=labels, cmap="viridis", alpha=0.6)
-            plt.colorbar(scatter)
-            ax.set_title(title, pad=20, fontsize=14, fontweight="bold")
-            ax.set_xlabel("X", fontsize=12)
-            ax.set_ylabel("Y", fontsize=12)
-            ax.grid(True, linestyle="--", alpha=0.7)
-            plt.tight_layout()
-
-            # Save plot
-            plot_path = self.run_dir / "plots" / f"{dataset_name}_2d_clustering.png"
-            plt.savefig(plot_path, dpi=300, bbox_inches="tight")
-            plt.close("all")
-
-        except Exception as e:
-            self.console.print(f"[yellow]Warning: Could not create 2D clustering plot: {str(e)}[/yellow]")
+        fig, ax = plt.subplots(figsize=tuple(self.config["visualization"]["figure_size"]))
+        scatter = ax.scatter(
+            data[:, 0],
+            data[:, 1],
+            c=labels,
+            cmap=self.config["visualization"]["cmap"],
+            s=self.config["visualization"]["point_size"],
+        )
+        plt.colorbar(scatter)
+        ax.set_title(title, pad=20, fontsize=14, fontweight="bold")
+        ax.set_xlabel("X", fontsize=12)
+        ax.set_ylabel("Y", fontsize=12)
+        ax.grid(True, linestyle="--", alpha=0.7)
 
     def visualize_high_dim_clustering(self, data, labels, title, dataset_name):
         """Visualize clustering results for high-dimensional data using PCA"""
